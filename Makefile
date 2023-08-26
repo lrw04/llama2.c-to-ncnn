@@ -13,3 +13,5 @@ inference: inference.cpp
 
 convert: convert.cpp
 	$(CXX) convert.cpp -o convert $(CXXOPTS)
+
+.PHONY: all clean
