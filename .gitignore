@@ -31,9 +31,13 @@
 *.out
 *.app
 
+/.vscode
 /convert
 /inference
 
 *.bin
 *.param
 *.desc
+
+/venv
+test*
