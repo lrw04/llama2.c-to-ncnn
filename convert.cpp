@@ -10,6 +10,7 @@
 #include <iostream>
 #include <map>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <variant>
 #include <vector>
@@ -122,8 +123,12 @@ struct op {
 struct graph {
     std::vector<op> ops;
     int cnt_operands;
+    std::unordered_map<int, std::string> operand_names;
     graph() { cnt_operands = 0; }
-    void write(std::string name, int global_input, int global_output) {
+    std::string name_map(int x) {
+        return operand_names.count(x) ? operand_names[x] : std::to_string(x);
+    }
+    void write(std::string name) {
         std::ofstream param(name + ".param"),
             bin(name + ".bin", std::ios::binary);
         std::vector<int> outd(cnt_operands);
@@ -168,20 +173,8 @@ struct graph {
             param << o.type;
             param << " " << o.desc << "_op" << i;
             param << " " << o.inputs.size() << " " << o.outputs.size();
-            for (auto in : o.inputs) {
-                if (in == global_input)
-                    param << " in";
-                else
-                    param << " " << in;
-            }
-            for (auto out : o.outputs) {
-                if (out == global_input)
-                    param << " in";
-                else if (out == global_output)
-                    param << " out";
-                else
-                    param << " " << out;
-            }
+            for (auto in : o.inputs) param << " " << name_map(in);
+            for (auto out : o.outputs) param << " " << name_map(out);
             for (auto [k, v] : o.params) {
                 param << " " << k << "=";
                 switch (v.index()) {
@@ -387,28 +380,6 @@ struct graph {
         o.weight_size = infeat * outfeat;
         return cnt_operands++;
     }
-    int linear_cis(int a, int in_batch, long long infeat, long long outfeat,
-               float *weights, std::string desc = "") {
-        ops.emplace_back();
-        op &o = ops.back();
-        o.type = "Gemm";
-        o.desc = desc;
-        o.write_flag = true;
-        o.params[2] = 0;
-        o.params[3] = 0;
-        o.params[4] = 0;
-        o.params[5] = 1;
-        o.params[6] = 1;
-        o.params[7] = in_batch;
-        o.params[8] = outfeat;
-        o.params[9] = infeat;
-        o.params[10] = -1;
-        o.inputs.push_back(a);
-        o.outputs.push_back(cnt_operands);
-        o.weights = weights;
-        o.weight_size = infeat * outfeat;
-        return cnt_operands++;
-    }
     int matmul(int a, int b, std::string desc = "") {
         ops.emplace_back();
         op &o = ops.back();
@@ -503,7 +474,7 @@ struct graph {
         o.outputs.push_back(cnt_operands);
         return cnt_operands++;
     }
-    int softmax_dim_1(int a, std::string desc = "") {
+    int softmax_2(int a, std::string desc = "") {
         ops.emplace_back();
         op &o = ops.back();
         o.type = "Softmax";
@@ -523,75 +494,79 @@ struct graph {
         o.outputs.push_back(cnt_operands);
         return cnt_operands++;
     }
+    int crop(int a, int axis, int start, int end, std::string desc = "") {
+        ops.emplace_back();
+        op &o = ops.back();
+        o.type = "Crop";
+        o.desc = desc;
+        o.params[-23309] = "1," + std::to_string(start);
+        o.params[-23310] = "1," + std::to_string(end);
+        o.params[-23311] = "1," + std::to_string(axis);
+        o.inputs.push_back(a);
+        o.outputs.push_back(cnt_operands);
+        return cnt_operands++;
+    }
+    std::pair<int, int> take_last_freqs(int freqs_cos, int freqs_sin,
+                                        config c) {
+        return {crop(freqs_cos, 0, -1, 0, "take_last_freqs_cos"),
+                crop(freqs_sin, 0, -1, 0, "take_last_freqs_sin")};  // ?
+    }
     std::pair<int, int> apply_rotary_emb(int xq, int xk, config c,
                                          int freqs_cos, int freqs_sin) {
-        xq = view4(xq, c.ctx_len, c.n_heads, c.dim / c.n_heads / 2, 2,
-                   "xq_view");
-        xk = view4(xk, c.ctx_len, c.n_heads, c.dim / c.n_heads / 2, 2,
-                   "xk_view");
+        xq = view4(xq, 1, c.n_heads, c.dim / c.n_heads / 2, 2, "xq_view");
+        xk = view4(xk, -1, c.n_heads, c.dim / c.n_heads / 2, 2, "xk_view");
         auto [xq_r, xq_i] = unbind2(xq, "xq_unbind");
         auto [xk_r, xk_i] = unbind2(xk, "xk_unbind");
-        xq_r = view3(xq_r, c.ctx_len, c.n_heads, c.dim / c.n_heads / 2, "xq_r");
-        xq_i = view3(xq_i, c.ctx_len, c.n_heads, c.dim / c.n_heads / 2, "xq_i");
-        xk_r = view3(xk_r, c.ctx_len, c.n_heads, c.dim / c.n_heads / 2, "xk_r");
-        xk_i = view3(xk_i, c.ctx_len, c.n_heads, c.dim / c.n_heads / 2, "xk_i");
-        auto xq_out_r = minus(elemwisemul(xq_r, freqs_cos),
-                              elemwisemul(xq_i, freqs_sin), "xq_out_r");
-        auto xq_out_i = add(elemwisemul(xq_r, freqs_sin),
-                            elemwisemul(xq_i, freqs_cos), "xq_out_i");
+        xq_r = view3(xq_r, 1, c.n_heads, c.dim / c.n_heads / 2, "xq_r");
+        xq_i = view3(xq_i, 1, c.n_heads, c.dim / c.n_heads / 2, "xq_i");
+        xk_r = view3(xk_r, -1, c.n_heads, c.dim / c.n_heads / 2, "xk_r");
+        xk_i = view3(xk_i, -1, c.n_heads, c.dim / c.n_heads / 2, "xk_i");
+        freqs_cos = view3(freqs_cos, -1, 1, c.dim / c.n_heads / 2);
+        freqs_sin = view3(freqs_sin, -1, 1, c.dim / c.n_heads / 2);
+        auto [fcq, fsq] = take_last_freqs(freqs_cos, freqs_sin, c);
+        auto xq_out_r =
+            minus(elemwisemul(xq_r, fcq), elemwisemul(xq_i, fsq), "xq_out_r");
+        auto xq_out_i =
+            add(elemwisemul(xq_r, fsq), elemwisemul(xq_i, fcq), "xq_out_i");
         auto xk_out_r = minus(elemwisemul(xk_r, freqs_cos),
                               elemwisemul(xk_i, freqs_sin), "xk_out_r");
         auto xk_out_i = add(elemwisemul(xk_r, freqs_sin),
                             elemwisemul(xk_i, freqs_cos), "xk_out_i");
 
-        auto xq_out = view3(stack(xq_out_r, xq_out_i, 2), c.ctx_len, c.n_heads,
-                            c.dim / c.n_heads, "xq_out");
-        auto xk_out = view3(stack(xk_out_r, xk_out_i, 2), c.ctx_len, c.n_heads,
-                            c.dim / c.n_heads, "xk_out");
+        // make Concat interleave real and imaginary components
+        xq_out_r = view3(xq_out_r, 1, -1, 1);
+        xq_out_i = view3(xq_out_i, 1, -1, 1);
+        xk_out_r = view3(xk_out_r, 1, -1, 1);
+        xk_out_i = view3(xk_out_i, 1, -1, 1);
+
+        auto xq_out = view3(stack(xq_out_r, xq_out_i, 2, "xq_stack"), 1,
+                            c.n_heads, c.dim / c.n_heads, "xq_out");
+        auto xk_out = view3(stack(xk_out_r, xk_out_i, 2, "xk_stack"), -1,
+                            c.n_heads, c.dim / c.n_heads, "xk_out");
 
         return {xq_out, xk_out};
     }
-    int rmsnorm_att(int layer, llama_weights w, config c, int in,
-                    float eps = 1e-5f) {
-        float *weight = w.rms_att + layer * c.dim;
-        return elemwisemul(
-            elemwisemul(in, rsqrt(addall(mean_1_keepdim(square(in)), eps)),
-                        "norm"),
-            constant(weight, c.dim, 1, 0, "gain_att_" + std::to_string(layer)),
-            "gainmul_att_" + std::to_string(layer));
-    }
-    int rmsnorm_ffn(int layer, llama_weights w, config c, int in,
-                    float eps = 1e-5f) {
-        float *weight = w.rms_ffn + layer * c.dim;
+    int rmsnorm(int in, config c, float *gain, float eps = 1e-5f) {
         return elemwisemul(
             elemwisemul(in, rsqrt(addall(mean_1_keepdim(square(in)), eps))),
-            constant(weight, c.dim, 1, 0, "gain_ffn_" + std::to_string(layer)),
-            "gainmul_ffn_" + std::to_string(layer));
+            constant(gain, c.dim, 1, 0, "gain"), "rmsnorm");
     }
-    int rmsnorm_final(llama_weights w, config c, int in, float eps = 1e-5f) {
-        float *weight = w.rms_final;
-        return elemwisemul(
-            elemwisemul(in, rsqrt(addall(mean_1_keepdim(square(in)), eps))),
-            constant(weight, c.dim, 1, 0, "finalgain"), "gainmul_final");
-    }
-    int attention(int layer, llama_weights w, config c, int in, int freqs_cos,
-                  int freqs_sin, int mask) {
+    std::tuple<int, int, int> attention(int layer, llama_weights w, config c,
+                                        int x, int kcache, int vcache,
+                                        int freqs_cos, int freqs_sin) {
         int head_dim = c.dim / c.n_heads;
-        auto xq = view3(
-            linear(in, c.ctx_len, c.dim, c.dim, w.wq + layer * c.dim * c.dim,
-                   "xq_linear" + std::to_string(layer)),
-            c.ctx_len, c.n_heads, c.dim / c.n_heads,
-            "xq" + std::to_string(layer));
-        auto xk = view3(
-            linear(in, c.ctx_len, c.dim, c.dim, w.wk + layer * c.dim * c.dim,
-                   "xk_linear" + std::to_string(layer)),
-            c.ctx_len, c.n_heads, c.dim / c.n_heads,
-            "xk" + std::to_string(layer));
-        auto xv = view3(
-            linear(in, c.ctx_len, c.dim, c.dim, w.wv + layer * c.dim * c.dim,
-                   "xv_linear" + std::to_string(layer)),
-            c.ctx_len, c.n_heads, c.dim / c.n_heads,
-            "xv" + std::to_string(layer));
+        auto xq = linear(x, 1, c.dim, c.dim, w.wq + layer * c.dim * c.dim,
+                         "xq_linear_" + std::to_string(layer));
+        auto xk = linear(x, 1, c.dim, c.dim, w.wk + layer * c.dim * c.dim,
+                         "xk_linear_" + std::to_string(layer));
+        auto xv = linear(x, 1, c.dim, c.dim, w.wv + layer * c.dim * c.dim,
+                         "xv_linear_" + std::to_string(layer));
+        xk = stack(kcache, xk, 0, "stack_xk");
+        xv = stack(vcache, xv, 0, "stack_xv");
+        int kco = xk, vco = xv;
+        xq = view3(xq, 1, c.n_heads, c.dim / c.n_heads, "xq");
+        xk = view3(xk, -1, c.n_heads, c.dim / c.n_heads, "xk");
+        xv = view3(xv, -1, c.n_heads, c.dim / c.n_heads, "xv");
         auto [xqr, xkr] = apply_rotary_emb(xq, xk, c, freqs_cos, freqs_sin);
         xq = transpose3_01(xqr, "xq_01_" + std::to_string(layer));
         xk = transpose3_01(xkr, "xk_01_" + std::to_string(layer));
@@ -600,37 +575,39 @@ struct graph {
             div(matmul(xq, transpose3_12(xk, "xk_12"),
                        "scores_matmul_" + std::to_string(layer)),
                 sqrt(c.dim / c.n_heads), "scores_div_" + std::to_string(layer));
-        scores = add(scores, mask, "addmask_" + std::to_string(layer));
-        scores =
-            softmax_dim_1(scores, "scores_softmax_" + std::to_string(layer));
+        scores = softmax_2(scores, "scores_softmax_" + std::to_string(layer));
         auto out = matmul(scores, xv);
         out = transpose3_01(out);
-        out = view2(out, c.ctx_len, c.dim);
-        return linear(out, c.ctx_len, c.dim, c.dim,
-                      w.wo + layer * c.dim * c.dim,
-                      "out_linear_" + std::to_string(layer));
+        out = view2(out, -1, c.dim);
+        return {linear(out, 1, c.dim, c.dim, w.wo + layer * c.dim * c.dim,
+                       "out_linear_" + std::to_string(layer)),
+                kco, vco};
     }
     int ffn(int layer, llama_weights w, config c, int in) {
         return linear(
-            elemwisemul(silu(linear(in, c.ctx_len, c.dim, c.hidden_dim,
+            elemwisemul(silu(linear(in, 1, c.dim, c.hidden_dim,
                                     w.w1 + layer * c.dim * c.hidden_dim,
                                     "w1_" + std::to_string(layer))),
-                        linear(in, c.ctx_len, c.dim, c.hidden_dim,
+                        linear(in, 1, c.dim, c.hidden_dim,
                                w.w3 + layer * c.dim * c.hidden_dim,
                                "w3_" + std::to_string(layer))),
-            c.ctx_len, c.hidden_dim, c.dim, w.w2 + layer * c.hidden_dim * c.dim,
+            1, c.hidden_dim, c.dim, w.w2 + layer * c.hidden_dim * c.dim,
             "w2_" + std::to_string(layer));
     }
-    int transformer_block(int layer, llama_weights w, config c, int in,
-                          int freqs_cos, int freqs_sin, int mask) {
-        auto h = add(in,
-                     attention(layer, w, c, rmsnorm_att(layer, w, c, in),
-                               freqs_cos, freqs_sin, mask),
-                     "tb_h_" + std::to_string(layer));
-        auto out = add(h, ffn(layer, w, c, rmsnorm_ffn(layer, w, c, h)),
-                       "layer_" + std::to_string(layer));
-        return out;
+    std::tuple<int, int, int> transformer_block(int layer, llama_weights w,
+                                                config c, int in, int kcache,
+                                                int vcache, int freqs_cos,
+                                                int freqs_sin) {
+        auto h = rmsnorm(in, c, w.rms_att + layer * c.dim);
+        auto [att, kc, vc] =
+            attention(layer, w, c, h, kcache, vcache, freqs_cos, freqs_sin);
+        h = add(in, att, "tb_h_" + std::to_string(layer));
+        auto nh = rmsnorm(h, c, w.rms_ffn + layer * c.dim);
+        auto out =
+            add(h, ffn(layer, w, c, nh), "layer_" + std::to_string(layer));
+        return {out, kc, vc};
     }
+    void give_name(int x, std::string name) { operand_names[x] = name; }
 };
 
 // cvtbin llama-2-7b.bin model
@@ -658,27 +635,33 @@ int main(int argc, char **argv) {
 
     conf.vocab_size = abs(conf.vocab_size);
 
-    std::vector<float> mask_v(conf.ctx_len * conf.ctx_len);
-    for (size_t i = 0; i < conf.ctx_len; i++)
-        for (size_t j = 0; j < conf.ctx_len; j++)
-            mask_v[i * conf.ctx_len + j] = j > i ? -1.0f / 0.0f : 0;
-
     graph g;
     int input = g.input("input");
+    g.give_name(input, "in");
     int x = g.embed(weights, conf, input, "embed");
-    int freqs_cos = g.constant(weights.freqs_re, conf.dim / conf.n_heads / 2, 1,
-                               conf.ctx_len, "freqs_cos");
-    int freqs_sin = g.constant(weights.freqs_im, conf.dim / conf.n_heads / 2, 1,
-                               conf.ctx_len, "freqs_sin");
-    int mask = g.constant(mask_v.data(), conf.ctx_len, conf.ctx_len, 1, "mask");
-    for (int i = 0; i < conf.n_layers; i++)
-        x = g.transformer_block(i, weights, conf, x, freqs_cos, freqs_sin,
-                                mask);
-    x = g.rmsnorm_final(weights, conf, x);
-    x = g.linear(x, conf.ctx_len, conf.dim, conf.vocab_size, weights.unembed,
-                 "unembed");
+    int freqs_cos = g.input("freqs_cos");
+    int freqs_sin = g.input("freqs_sin");
+    g.give_name(freqs_cos, "freqs_cos");
+    g.give_name(freqs_sin, "freqs_sin");
+    for (int i = 0; i < conf.n_layers; i++) {
+        int kcache_i = g.input("kcache_" + std::to_string(i));
+        int vcache_i = g.input("vcache_" + std::to_string(i));
+        g.give_name(kcache_i, "kcache." + std::to_string(i));
+        g.give_name(vcache_i, "vcache." + std::to_string(i));
+        auto [xnew, kcache_o, vcache_o] = g.transformer_block(
+            i, weights, conf, x, kcache_i, vcache_i, freqs_cos, freqs_sin);
+        x = xnew;
+        g.give_name(kcache_o, "kcache_out." + std::to_string(i));
+        g.give_name(vcache_o, "vcache_out." + std::to_string(i));
+    }
+    x = g.rmsnorm(x, conf, weights.rms_final);
+    x = g.linear(x, 1, conf.dim, conf.vocab_size, weights.unembed, "unembed");
 
-    g.write(model, input, x);
+    g.give_name(x, "out");
+    g.write(model);
     std::ofstream desc(model + ".desc");
-    desc << conf.ctx_len << std::endl;
+    desc << conf.ctx_len << std::endl
+         << conf.n_layers << std::endl
+         << conf.dim << std::endl
+         << conf.n_heads << std::endl;
 }
