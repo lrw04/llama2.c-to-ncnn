@@ -24,6 +24,10 @@ Use `export.py` from <https://github.com/karpathy/llama2.c>.
 
 You will get `7b.ncnn.bin`, `7b.ncnn.param` and `7b.ncnn.desc`. For any model with the three files, the common name `7b.ncnn` is used to denote the model.
 
+## Get tokenizer model
+
+Please retrieve it from <https://github.com/karpathy/llama2.c>. It is under the name of `tokenizer.bin`.
+
 ## Complete text using the resulting model
 
 ```
