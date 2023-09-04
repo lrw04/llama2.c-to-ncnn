@@ -362,18 +362,12 @@ struct graph {
                float *weights, std::string desc = "") {
         ops.emplace_back();
         op &o = ops.back();
-        o.type = "Gemm";
+        o.type = "InnerProduct";
         o.desc = desc;
         o.write_flag = true;
-        o.params[2] = 0;
-        o.params[3] = 1;
-        o.params[4] = 0;
-        o.params[5] = 1;
-        o.params[6] = 1;
-        o.params[7] = in_batch;
-        o.params[8] = outfeat;
-        o.params[9] = infeat;
-        o.params[10] = -1;
+        o.params[0] = outfeat;
+        o.params[1] = 0;
+        o.params[2] = infeat * outfeat;
         o.inputs.push_back(a);
         o.outputs.push_back(cnt_operands);
         o.weights = weights;
