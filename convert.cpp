@@ -95,13 +95,13 @@ size_t weight_size(config c) {
     bool shared = c.vocab_size > 0;
     c.vocab_size = abs(c.vocab_size);
     size_t size = 0;
-    size += (long long)c.vocab_size * c.dim;                   // embedding
-    size += (long long)c.n_layers * c.dim * 2;                 // rms norms
-    size += (long long)c.n_layers * c.dim * c.dim * 4;         // wq, wk, wv, wo
-    size += (long long)c.n_layers * c.hidden_dim * c.dim * 3;  // w1, w2, w3
+    size += c.vocab_size * c.dim;                   // embedding
+    size += c.n_layers * c.dim * 2;                 // rms norms
+    size += c.n_layers * c.dim * c.dim * 4;         // wq, wk, wv, wo
+    size += c.n_layers * c.hidden_dim * c.dim * 3;  // w1, w2, w3
     size += c.dim;                                             // final rms norm
-    size += (long long)c.ctx_len * (c.dim / c.n_heads);        // freqs
-    if (!shared) size += (long long)c.vocab_size * c.dim;      // unembedding
+    size += c.ctx_len * (c.dim / c.n_heads);        // freqs
+    if (!shared) size += c.vocab_size * c.dim;      // unembedding
     return size;
 }
 
@@ -111,11 +111,13 @@ struct op {
     size_t weight_size;
     std::vector<int> inputs, outputs;
     std::map<int, param> params;
-    bool write_flag;
+    bool write_flag, quantize_flag;
+    int group_size;
     op() {
         weights = nullptr;
         weight_size = 0;
         write_flag = false;
+        quantize_flag = false;
         desc = "";
     }
 };
@@ -128,7 +130,7 @@ struct graph {
     std::string name_map(int x) {
         return operand_names.count(x) ? operand_names[x] : std::to_string(x);
     }
-    void write(std::string name) {
+    void write(std::string name, std::string binname, float *base) {
         std::ofstream param(name + ".param"),
             bin(name + ".bin", std::ios::binary);
         std::vector<int> outd(cnt_operands);
@@ -192,16 +194,55 @@ struct graph {
             param << "\n";
 
             if (o.weights) {
-                // std::cerr << o.desc << " " << o.weight_size << std::endl;
+                std::vector<float> weights(o.weight_size);
+                size_t offset = 7 * 4 + 4 * (o.weights - base);
+                std::ifstream binin(binname, std::ios::binary);
+                binin.seekg(offset);
+                binin.read((char *)weights.data(), o.weight_size * 4);
+                std::cerr << o.desc << " " << o.weight_size << std::endl;
                 // for (int i = 0; i < 4; i++) std::cerr << o.weights[i] << " ";
                 // std::cerr << std::endl;
-                if (o.write_flag) {
+                if (o.quantize_flag) {
+                    std::vector<float> scale;
+                    std::vector<int8_t> weight;
+                    if (o.weight_size % o.group_size) {
+                        std::cerr << "Invalid group_size: " << o.group_size
+                                  << " for weight size " << o.weight_size
+                                  << "\n";
+                        exit(1);
+                    }
+                    scale.resize(o.weight_size / o.group_size);
+                    weight.resize(o.weight_size);
+                    for (size_t i = 0; i < o.weight_size; i += o.group_size) {
+                        float maxabs = 0;
+                        for (int j = 0; j < o.group_size; j++)
+                            maxabs = std::max(maxabs, fabsf(weights[i + j]));
+                        scale[i / o.group_size] = maxabs / 127.0f;
+                        for (int j = 0; j < o.group_size; j++)
+                            weight[i + j] =
+                                weights[i + j] / scale[i / o.group_size];
+                    }
+                    for (size_t i = 0; i < scale.size(); i++) {
+                        char f32_bytes[4];
+                        memcpy(f32_bytes, scale.data() + i, 4);
+                        bin.write(f32_bytes, 4);
+                        bytes += 4;
+                    }
+                    // no need for alignment
+                    char int8_magic[] = {0x38, 0x4b, 0x0d, 0x00};  // 0x000D4B38
+                    bin.write(int8_magic, 4);
+                    for (size_t i = 0; i < o.weight_size; i++) {
+                        char byte;
+                        memcpy(&byte, weight.data() + i, 1);
+                        bin.write(&byte, 1);
+                    }
+                } else if (o.write_flag) {
                     char f16_magic[] = {0x47, 0x6b, 0x30, 0x01};  // 0x01306B47
                     bin.write(f16_magic, 4);
                     bytes += 4;
                     for (size_t i = 0; i < o.weight_size; i++) {
                         char f16_bytes[2];
-                        uint16_t f16 = fp32_to_fp16(o.weights[i]);
+                        uint16_t f16 = fp32_to_fp16(weights[i]);
                         memcpy(f16_bytes, &f16, 2);
                         bin.write(f16_bytes, 2);
                         bytes += 2;
@@ -218,7 +259,7 @@ struct graph {
                 } else {
                     for (size_t i = 0; i < o.weight_size; i++) {
                         char f32_bytes[4];
-                        memcpy(f32_bytes, o.weights + i, 4);
+                        memcpy(f32_bytes, weights.data() + i, 4);
                         bin.write(f32_bytes, 4);
                         bytes += 4;
                     }
@@ -362,12 +403,14 @@ struct graph {
                float *weights, std::string desc = "") {
         ops.emplace_back();
         op &o = ops.back();
-        o.type = "InnerProduct";
+        o.type = "LinearInt8";
         o.desc = desc;
         o.write_flag = true;
-        o.params[0] = outfeat;
-        o.params[1] = 0;
-        o.params[2] = infeat * outfeat;
+        o.quantize_flag = true;
+        o.params[0] = infeat;
+        o.params[1] = outfeat;
+        o.params[2] = 32;
+        o.group_size = 32;
         o.inputs.push_back(a);
         o.outputs.push_back(cnt_operands);
         o.weights = weights;
@@ -621,8 +664,10 @@ int main(int argc, char **argv) {
     llama_weights weights;
     read_config(bin, conf);
     size_t size = weight_size(conf);
-    weights.weights = (float *)malloc(sizeof(float) * size);
-    fread(weights.weights, sizeof(float), size, bin);
+    float zero = 0.0f;
+    weights.weights = &zero;
+    // weights.weights = (float *)malloc(sizeof(float) * size);
+    // fread(weights.weights, sizeof(float), size, bin);
     weights.fill_fields(conf);
     fclose(bin);
     bin = nullptr;
@@ -652,7 +697,7 @@ int main(int argc, char **argv) {
     x = g.linear(x, 1, conf.dim, conf.vocab_size, weights.unembed, "unembed");
 
     g.give_name(x, "out");
-    g.write(model);
+    g.write(model, bin_path, weights.weights);
     std::ofstream desc(model + ".desc");
     desc << conf.ctx_len << std::endl
          << conf.n_layers << std::endl
