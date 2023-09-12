@@ -1,10 +1,10 @@
 # llama2.c-to-ncnn
 
-A converter for llama2.c legacy models to ncnn models. Currently, this is only tested on the 7B model.
+A converter for llama2.c legacy models to ncnn models. Currently, this is only tested on the 7B and 13B model.
 
 ## Compiling
 
-Set the NCNN_DIR directory to your directory for your ncnn source tree, with a build.
+Set the NCNN_DIR directory to your directory for your ncnn source tree, with a build. The source tree must contain code for the LinearInt8 layer, at <https://github.com/Tencent/ncnn/pull/5007>.
 
 ```
 make
@@ -14,19 +14,23 @@ You will get two binaries in the current folder, `convert` and `inference`. `con
 
 ## Converting Meta's weights
 
-Use `export.py` from <https://github.com/karpathy/llama2.c>.
+Use `convert.py`:
+
+```
+python convert.py --outfile <output file> <model directory>
+```
 
 ## Converting weights into ncnn's format
 
 ```
-./convert 7b.bin 7b.ncnn
+./convert <output file> <ncnn model name>
 ```
 
 You will get `7b.ncnn.bin`, `7b.ncnn.param` and `7b.ncnn.desc`. For any model with the three files, the common name `7b.ncnn` is used to denote the model.
 
 ## Get tokenizer model
 
-Please retrieve it from <https://github.com/karpathy/llama2.c>. It is under the name of `tokenizer.bin`.
+Please retrieve it from <https://github.com/karpathy/llama2.c>. It is under the name of `tokenizer.bin`. Preferredly, obtain it from an older commit and you will have proper newlines instead of <0x0A>.
 
 ## Complete text using the resulting model
 
@@ -48,5 +52,5 @@ All of the above are generated with the 7B model.
 
 - [X] KV cache
 - [ ] Chat completion support
-- [ ] int8 quantization
-- [ ] Reduce memory usage during conversion
+- [X] int8 quantization
+- [X] Reduce memory usage during conversion
