@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -79,7 +80,7 @@ std::vector<int> bpe::encode(std::string s) {
 
 struct tinyllama {
     ncnn::Net net;
-    std::vector<ncnn::Mat> kcache, vcache, kcp, vcp;
+    std::vector<ncnn::Mat> kcache, vcache;
     int ctx_length, pos, n_l, dim, n_heads;
     std::vector<float> freqs_cos, freqs_sin;
     tinyllama(std::string bin, std::string param, int n_layers, int ctx_len,
@@ -98,8 +99,6 @@ tinyllama::tinyllama(std::string bin, std::string param, int n_layers,
     n_heads = nh;
     kcache.resize(n_l);
     vcache.resize(n_l);
-    kcp.resize(n_l);
-    vcp.resize(n_l);
     int head_dim = dim / n_heads;
     freqs_cos.resize(ctx_length * head_dim / 2);
     freqs_sin.resize(ctx_length * head_dim / 2);
@@ -116,6 +115,8 @@ tinyllama::tinyllama(std::string bin, std::string param, int n_layers,
         kcache[i].create(dim, 0);
         vcache[i].create(dim, 0);
     }
+    net.opt.use_fp16_storage = false;
+    // net.opt.num_threads = 8;
 }
 
 std::vector<float> tinyllama::forward(int token) {
@@ -146,16 +147,11 @@ std::vector<float> tinyllama::forward(int token) {
         auto layer_name = std::to_string(i);
         auto kc_name = "kcache_out." + layer_name;
         auto vc_name = "vcache_out." + layer_name;
-        ex.extract(kc_name.c_str(), kcp[i]);
-        ex.extract(vc_name.c_str(), vcp[i]);
+        ex.extract(kc_name.c_str(), kcache[i]);
+        ex.extract(vc_name.c_str(), vcache[i]);
     }
     ex.extract("out", logits_mat);
     std::vector<float> logits(logits_mat.total());
-
-    for (int i = 0; i < n_l; i++) {
-        kcache[i] = kcp[i].clone();
-        vcache[i] = vcp[i].clone();
-    }
 
     for (size_t i = 0; i < logits_mat.total(); i++) logits[i] = logits_mat[i];
 
@@ -186,6 +182,9 @@ int sample(const std::vector<float>& logits, float temp, float topp, int topk) {
     // return std::max_element(logits.begin(), logits.end()) - logits.begin();
 
     assert(logits.size() == vocab_size);
+
+    if (fabsf(temp) < 1e-8)
+        return std::max_element(logits.begin(), logits.end()) - logits.begin();
 
     static std::mt19937_64 rng(3407);  // haha
     static std::uniform_real_distribution<float> dist(0, 1);
@@ -258,12 +257,24 @@ int main(int argc, char** argv) {
     // for (int i = 0; i < token_count; i++) std::cout << tokens[i] << " ";
     // std::cout << std::endl;
 
+    std::chrono::steady_clock clk;
+    auto t0 = clk.now();
+
     // feed forward
     for (int i = 0; i < token_count; i++) {
         std::cout << tokenizer.vocab[tokens[i]] << std::flush;
         auto logits = model.forward(tokens[i]);
         if (i < prompt_end - 1) continue;
         tokens[i + 1] = sample(logits, temp, topp, topk);
+        if (i == 0) t0 = clk.now();
     }
     std::cout << std::endl;
+
+    auto t1 = clk.now();
+    auto elapsed =
+        std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0);
+    std::cerr << elapsed.count() / (token_count - 1) << " ms / token"
+              << std::endl;
+
+    exit(0);
 }
