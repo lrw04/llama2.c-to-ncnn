@@ -4,10 +4,16 @@ A converter for llama2.c legacy models to ncnn models. Currently, this is only t
 
 ## Compiling
 
-Set the NCNN_DIR directory to your directory for your ncnn source tree, with a build. The source tree must contain code for the LinearInt8 layer, at <https://github.com/Tencent/ncnn/pull/5007>.
+Set the NCNN_DIR directory to your directory for your ncnn source tree or it will search for ncnn in the parent directory, build ncnn first.<br>
+The ncnn source tree must contain code for the LinearInt8 layer, at <https://github.com/Tencent/ncnn/pull/5007>.
 
 ```
-make
+git clone --depth=1 https://github.com/lrw04/llama2.c-to-ncnn
+cd llama2.c-to-ncnn
+mkdir build
+cd build
+cmake ..
+make -j$(nproc)
 ```
 
 You will get two binaries in the current folder, `convert` and `inference`. `convert` is the converter from llama2.c legacy format to ncnn format, and `inference` is an example of how to use the resulting ncnn models.
@@ -24,9 +30,12 @@ python convert.py --outfile <output file> <model directory>
 
 ```
 ./convert <output file> <ncnn model name>
+
+# example
+./convert stories15M.bin stories15M.ncnn
 ```
 
-You will get `7b.ncnn.bin`, `7b.ncnn.param` and `7b.ncnn.desc`. For any model with the three files, the common name `7b.ncnn` is used to denote the model.
+You will get `stories15M.ncnn.bin`, `stories15M.ncnn.param` and `stories15M.ncnn.desc`. For any model with the three files, the common name `7b.ncnn` is used to denote the model.
 
 ## Get tokenizer model
 
@@ -36,6 +45,9 @@ Please retrieve it from <https://github.com/karpathy/llama2.c>. It is under the 
 
 ```
 ./inference <MODEL> <PROMPT> <N-TOKENS>
+
+# exapmle
+./inference stories15M.ncnn "Tell Something" 64
 ```
 
 ## Example outputs
